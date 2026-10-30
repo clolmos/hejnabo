@@ -94,6 +94,7 @@ button, input, textarea { font: inherit; color: inherit; }
   font: 500 13px/1 var(--f-mono); font-variant-numeric: tabular-nums;
 }
 .pane { display: flex; flex-direction: column; gap: 36px; }
+.hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
 .nextbtn {
   border: 1px solid var(--paper-ink); background: transparent; color: var(--paper-ink);
   border-radius: 10px; padding: 10px 14px; font: 600 14px var(--f-body); cursor: pointer;
@@ -322,6 +323,7 @@ img { max-width: 100%; }
         <div id="fb-rows"></div>
         <label class="lbl" for="fb-comment">Anything else? (optional)</label>
         <textarea id="fb-comment" maxlength="500" rows="3" placeholder="Too sweet, perfect crunch, wish there was a vegan one…"></textarea>
+        <div class="hp" aria-hidden="true"><label for="fb-website">Leave this empty</label><input type="text" id="fb-website" name="website" tabindex="-1" autocomplete="off"></div>
         <div class="actions">
           <button type="submit" class="btn primary" id="fb-submit">Send feedback</button>
           <span class="status" id="fb-status" role="status"></span>
@@ -366,7 +368,8 @@ img { max-width: 100%; }
     name: 'HejNabo!',
     mobilepayNumber: '',        // the MobilePay number customers can see and copy
     mobilepayLink: '',          // https link from MobilePay's link generator; the page adds amount and order text to it
-    feedbackFormUrl: '',        // optional: a public form link for people who can't submit here
+    feedbackEndpoint: 'https://script.google.com/macros/s/AKfycbyHupKG-S54gzhOcfYFTk1FdYw5XBlseDm-pxlLFPKbuVloGW7aSjLNs_LLVsCOOBSK/exec',       // the Google Apps Script web app address (ends in /exec) that saves answers to your sheet
+    feedbackFormUrl: '',        // optional: a public form link, used when no endpoint is set
     menu: [
       { id: 'kanelsnegl', img: 'rose', name: 'Kanelsnegl', sub: 'Cinnamon swirl', desc: 'Spiced swirl with a cream rose on top.', price: 38 },
       { id: 'froebolle', img: 'sesame', name: 'Frøbolle', sub: 'Seeded bun', desc: 'Sesame-topped and filled.', price: 36 },
@@ -379,6 +382,7 @@ img { max-width: 100%; }
     { k: 'fine', t: 'It was fine' },
     { k: 'nope', t: 'Not for me' }
   ];
+  var RATING_LABEL = { loved: 'Loved it', fine: 'It was fine', nope: 'Not for me' };
   var MAX_QTY = 20;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -513,7 +517,7 @@ img { max-width: 100%; }
   wireCopy(copyMessageBtn, 'mp-message');
 
   /* Feedback form */
-  var fbState = { db: null, uid: null, enabled: true };
+  var fbState = { db: null, uid: null, enabled: true, mode: '', endpoint: '' };
   function buildFeedbackRows() {
     var rows = $('fb-rows');
     CONFIG.menu.forEach(function (m) {
@@ -558,7 +562,8 @@ img { max-width: 100%; }
   }
   $('fb-form').addEventListener('submit', function (e) {
     e.preventDefault();
-    if (!fbState.enabled || !fbState.db || !fbState.uid) return;
+    var viaEndpoint = fbState.mode === 'endpoint';
+    if (!fbState.enabled || (!viaEndpoint && (!fbState.db || !fbState.uid))) return;
     var ratings = {};
     CONFIG.menu.forEach(function (m) {
       var c = document.querySelector('input[name="r-' + m.id + '"]:checked');
@@ -569,12 +574,25 @@ img { max-width: 100%; }
     var btn = $('fb-submit');
     btn.disabled = true;
     setStatus('Sending…');
-    var ref = fbState.db.doc('feedback/' + fbState.uid);
-    ref.get().then(function (snap) {
-      var prev = snap.exists && snap.data() && Array.isArray(snap.data().entries) ? snap.data().entries : [];
-      var entries = prev.concat([{ ratings: ratings, comment: comment, at: new Date().toISOString() }]).slice(-30);
-      return ref.set({ entries: entries });
-    }).then(function () {
+    var sending;
+    if (viaEndpoint) {
+      var named = {};
+      CONFIG.menu.forEach(function (m) { if (ratings[m.id]) named[m.name] = RATING_LABEL[ratings[m.id]]; });
+      sending = fetch(fbState.endpoint, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ ratings: named, comment: comment, website: $('fb-website').value })
+      });
+    } else {
+      var ref = fbState.db.doc('feedback/' + fbState.uid);
+      sending = ref.get().then(function (snap) {
+        var prev = snap.exists && snap.data() && Array.isArray(snap.data().entries) ? snap.data().entries : [];
+        var entries = prev.concat([{ ratings: ratings, comment: comment, at: new Date().toISOString() }]).slice(-30);
+        return ref.set({ entries: entries });
+      });
+    }
+    sending.then(function () {
       setStatus('');
       $('fb-form').hidden = true;
       $('fb-thanks').hidden = false;
@@ -700,7 +718,10 @@ img { max-width: 100%; }
       try { isEditor = !!(await user.canEdit()); } catch (e) {}
     }
     fbState.db = db; fbState.uid = uid;
-    if (!(db && uid && canWrite !== false)) disableFeedback();
+    var endpoint = (CONFIG.feedbackEndpoint || '').trim();
+    var live = !!(window.claude && window.claude.use);
+    if (!live && /^https:\/\//i.test(endpoint)) { fbState.mode = 'endpoint'; fbState.endpoint = endpoint; }
+    else if (!(db && uid && canWrite !== false)) disableFeedback();
     if (db && isEditor) {
       $('results').hidden = false;
       renderResults({ docs: [] });
